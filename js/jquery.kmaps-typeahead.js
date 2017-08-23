@@ -13,7 +13,7 @@
       max_defaults: 50,
       min_chars: 1,
       selected: 'omit', // possible values: 'omit' or 'class'
-      ancestors: 'on',
+      ancestors: '', // default to empty, which will be changed to 'on' for subjects, 'off' for places
       ancestor_separator: ' - ',
       pager: 'off', // or 'on'
       prefetch_facets: 'off',
@@ -28,7 +28,9 @@
       fields: '',
       filters: '',
       menu: '',
-      no_results_msg: ''
+      no_results_msg: '',
+      match_criterion: 'contains', //{contains, begins, exactly}
+      case_sensitive: false
     };
 
   function Plugin(element, options) {
@@ -56,23 +58,29 @@
       var input = $(plugin.element);
       var settings = plugin.settings;
 
-      var use_ancestry = (settings.ancestors == 'on');
+      var use_ancestry = settings.ancestors == 'on' || (settings.ancestors == '' && settings.domain == 'subjects');
       var result_paging = (settings.pager == 'on');
       var prefetch_facets = (settings.prefetch_facets == 'on');
-      var ancestor_field = (settings.domain == 'subjects') ? 'ancestor_ids_default' : 'ancestor_ids_pol.admin.hier';
+      var ancestor_field = 'ancestor_ids_generic'; //(settings.domain == 'subjects') ? 'ancestor_ids_default' : 'ancestor_ids_pol.admin.hier';
 
-      plugin.fq.push('tree:' + settings.domain);
+      //Previously all the queries have teh following filter, I removed it as a default to work with subjects and sources
+      //plugin.fq.push('tree:' + settings.domain);
       if (settings.filters) {
         plugin.fq.push(settings.filters);
       }
       if (settings.root_kmapid) {
-        plugin.fq.push(ancestor_field + ':' + settings.root_kmapid);
+        settings.root_kmapid = settings.root_kmapid.toString().trim().split(/\s+/);
+        plugin.fq.push(ancestor_field + ':(' + settings.root_kmapid.join(' OR ') + ')');
+        settings.root_kmapid = settings.root_kmapid.map(Number);
       }
       var fl = [];
       fl.push('id', 'header');
       if (use_ancestry) {
         plugin.fq.push('ancestor_id_path:*'); // force this field to be present
         fl.push('ancestors', 'ancestor_id_path', ancestor_field);
+      }
+      if (settings.domain == 'places') { // get feature types
+        fl.push('feature_types');
       }
       if (settings.fields) {
         fl = fl.concat(settings.fields.split(','));
@@ -100,9 +108,22 @@
           prepare: function (query, remote) { //http://stackoverflow.com/questions/18688891/typeahead-js-include-dynamic-variable-in-remote-url
             var extras = {};
             var val = input.val();
+            //val = val.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, "\\$&");
+            val = val.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, " ");
+            switch(settings.match_criterion){
+              case 'begins':
+                val = ""+val+"*";
+                break;
+              case 'exactly':
+                val = "\""+val+"\"";
+                break;
+              case 'contains': //do nothing
+                val = "*"+val+"*";
+            }
+						val = settings.case_sensitive ? val : val.toLowerCase();
             if (val) {
               extras = {
-                'q': settings.autocomplete_field + ':' + val.toLowerCase().replace(/[\s\u0f0b\u0f0d]+/g, '\\ '),
+                'q': settings.autocomplete_field + ':' + val.replace(/[\s\u0f0b\u0f0d]+/g, '\\ '),
                 'rows': settings.max_terms,
                 'sort': settings.sort,
                 'start': plugin.start,
@@ -132,7 +153,10 @@
           filter: function (json) {
             plugin.response = json; // store response... what if cached?
             var filtered = $.map(json.response.docs, function (doc, index) {
-              var highlighting = json.highlighting[doc.id];
+              var highlightingKeys = Object.keys(json.highlighting).filter(function(word){
+                return word.indexOf(doc.id) > -1;
+              });
+              var highlighting = json.highlighting[highlightingKeys[0]];
               var val = settings.autocomplete_field in highlighting ? highlighting[settings.autocomplete_field][0] : doc.header; //take first highlight if present
               var item = {
                 id: doc.id.substring(doc.id.indexOf('-') + 1),
@@ -143,10 +167,20 @@
                 count: 0 // for good measure
               };
               if (use_ancestry) {
+                var anstring;
+                if (settings.root_kmapid) {
+                  var idx = -1;
+                  for (var i=0; idx == -1; i++) {
+                    idx = doc[ancestor_field].indexOf(settings.root_kmapid[i]);
+                  }
+                  anstring = doc.ancestors.slice(idx).reverse().join(settings.ancestor_separator);
+                }
+                else {
+                  anstring = doc.ancestors.slice(0).reverse().join(settings.ancestor_separator);
+                }
                 $.extend(item, {
-                  anstring: settings.root_kmapid ?
-                    doc.ancestors.slice(doc[ancestor_field].indexOf(parseInt(settings.root_kmapid))).reverse().join(settings.ancestor_separator) :
-                    doc.ancestors.slice(0).reverse().join(settings.ancestor_separator)
+                  parent: doc.ancestors[doc.ancestors.length-2],
+                  anstring: anstring
                 });
               }
               return item;
@@ -252,6 +286,7 @@
               return remote;
             },
             filter: function (json) {
+              if(json.facet_counts === undefined) return [];
               var raw = json.facet_counts.facet_fields[prefetch_field] ? json.facet_counts.facet_fields[prefetch_field] : json.facet_counts.facet_fields[refacet_field];
               var facets = [];
               for (var i = 0; i < raw.length; i += 2) {
@@ -305,7 +340,11 @@
             results = 'All results';
           }
           var pager = !result_paging ? '' : KMapsUtil.getTypeaheadPager(Number(plugin.settings.max_terms), data.suggestions[0].index, data.suggestions[0].numFound);
-          return '<div class="kmaps-tt-header kmaps-tt-results"><button class="close" aria-hidden="true" type="button">×</button>' + results + pager + '</div>';
+          var header = '<div class="kmaps-tt-header kmaps-tt-results"><button class="close" aria-hidden="true" type="button">×</button>' + results + pager + '</div>';
+          if (settings.domain == 'places') { // add column headers
+            header += '<div class="kmaps-place-results-header"><span class="kmaps-place-name">Name</span> <span class="kmaps-feature-type">Feature Type</span></div>';
+          }
+          return header;
         },
         footer: function (data) {
           var pager = !result_paging ? '' : KMapsUtil.getTypeaheadPager(Number(plugin.settings.max_terms), data.suggestions[0].index, data.suggestions[0].numFound);
@@ -318,8 +357,14 @@
         suggestion: function (data) {
           var cl = [];
           if (data.selected) cl.push('kmaps-tt-selected');
-          return '<div class="' + cl.join(' ') + '"><span class="kmaps-term">' + data.value + '</span>' +
-            (use_ancestry ? ' <span class="kmaps-ancestors">' + data.anstring + '</span>' : '') + '</div>';
+          var display_path = data.doc.ancestors ? data.doc.ancestors.join("/") : "";
+          if (settings.domain == 'places') { // show feature types
+            cl.push('kmaps-place-result');
+            var feature_types = data.doc.feature_types ? data.doc.feature_types.join('/') : '';
+            return '<div data-id="' + data.id + '" data-path="' + display_path + '" class="' + cl.join(' ') + '"><span class="kmaps-place-name">' + data.value + '</span> <span class="kmaps-feature-type">' + feature_types + '</span>' + '</div>';
+          } else { // show hierarchy
+            return '<div data-id="' + data.id + '" data-path="' + display_path + '" class="' + cl.join(' ') + '"><span class="kmaps-term">' + data.value + '</span>' + (use_ancestry ? ' <span class="kmaps-ancestors">' + data.anstring + '</span>' : '') + '</div>';
+          }
         }
       };
       var prefetch_templates = {
@@ -357,7 +402,7 @@
           var cl = [];
           if (data.selected) cl.push('kmaps-tt-selected');
           if (data.count == 0) cl.push('kmaps-tt-zero-facet');
-          return '<div class="' + cl.join(' ') + '"><span class="kmaps-term">' + data.value + '</span> ' +
+          return '<div data-id="' + data.id + '" class="' + cl.join(' ') + '"><span class="kmaps-term">' + data.value + '</span> ' +
             '<span class="kmaps-count">(' + data.count + ')</span>' +
             (use_ancestry ? ' <span class="kmaps-ancestors">' + data.anstring + '</span>' : '') + '</div>';
         }
@@ -402,7 +447,7 @@
                 var cl = [];
                 if (data.selected) cl.push('kmaps-tt-selected');
                 cl.push('selectable-facet');
-                return '<div class="' + cl.join(' ') + '"><span class="kmaps-term">' + data.value + '</span> ' +
+                return '<div data-id="' + data.id + '" class="' + cl.join(' ') + '"><span class="kmaps-term">' + data.value + '</span> ' +
                   '<span class="kmaps-count">(' + data.count + ')</span>' +
                   (use_ancestry ? ' <span class="kmaps-ancestors">' + data.anstring + '</span>' : '') + '</div>';
               }
@@ -652,6 +697,16 @@
 
     onFilterChange: function (fn) {
       this.filter_change.push(fn);
+    },
+
+    setAutocompleteField: function(field){
+      this.settings.autocomplete_field = field;
+    },
+    setMatchCriterion: function(criterion){
+      this.settings.match_criterion = criterion;
+    },
+    setCaseSensitive: function(case_sensitive){
+      this.settings.case_sensitive = case_sensitive ? true : false;
     },
 
   });
