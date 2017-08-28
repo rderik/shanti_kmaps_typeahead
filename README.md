@@ -17,7 +17,7 @@ $("#kmaps-search-source").kmapsTypeahead({
     domain: "sources",
     filters_domain: "subjects",
     root_kmap_path: null,
-    features_path: "/features/",
+    features_path: "HTTPS://PATH/TO/NODE/%%ID%%", //This base URL is a pattern with the %%ID%% to be replaced with each node's ID
     autocomplete_field: "title",
     filters: "asset_type:sources"
   });
